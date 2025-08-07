@@ -1,0 +1,14 @@
+datasets
+huggingface_hub
+python-dotenv
+requests
+tqdm
+pandas
+numpy
+ollama
+openai
+anthropic
+google-generativeai
+Pillow
+matplotlib
+seaborn
