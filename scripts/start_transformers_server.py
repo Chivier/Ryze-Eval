@@ -13,13 +13,16 @@ from pydantic import BaseModel
 from typing import List, Optional, Union
 import torch
 from transformers import (
+    AutoModel,
     AutoModelForCausalLM,
     AutoModelForVision2Seq,
     AutoTokenizer,
     AutoProcessor,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    AutoConfig
 )
 import logging
+import importlib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,13 +52,14 @@ class BatchGenerateResponse(BaseModel):
     model: str
 
 class ModelServer:
-    def __init__(self, model_name: str, device: str = "cuda:0", quantization: Optional[str] = None):
+    def __init__(self, model_name: str, device: str = "cuda:0", quantization: Optional[str] = None, attn_implementation: str = "auto"):
         self.model_name = model_name
         self.device = device
         self.model = None
         self.tokenizer = None
         self.processor = None
         self.is_vision_model = False
+        self.attn_implementation = attn_implementation
         
         self._load_model(quantization)
     
@@ -64,15 +68,38 @@ class ModelServer:
         logger.info(f"Loading model: {self.model_name}")
         logger.info(f"Device: {self.device}")
         
+        # Base model kwargs using the recommended approach
         model_kwargs = {
             "trust_remote_code": True,
-            "device_map": self.device if self.device != "auto" else "auto"
+            "torch_dtype": "auto",  # Use auto dtype selection
         }
+        
+        # Handle attention implementation
+        if self.attn_implementation == "auto":
+            # Try to check if flash_attention_2 is available
+            try:
+                import flash_attn
+                model_kwargs["attn_implementation"] = "flash_attention_2"
+                logger.info("Using flash_attention_2 implementation (auto-detected)")
+            except ImportError:
+                model_kwargs["attn_implementation"] = "eager"
+                logger.info("flash_attn not available, using eager attention implementation")
+        else:
+            model_kwargs["attn_implementation"] = self.attn_implementation
+            logger.info(f"Using {self.attn_implementation} attention implementation")
+        
+        # Handle device mapping
+        if self.device != "auto":
+            model_kwargs["device_map"] = self.device
+        else:
+            model_kwargs["device_map"] = "auto"
         
         # Configure quantization if requested
         if quantization == "8bit":
             model_kwargs["load_in_8bit"] = True
             model_kwargs["device_map"] = "auto"
+            # Remove torch_dtype when using quantization
+            model_kwargs.pop("torch_dtype", None)
         elif quantization == "4bit":
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -82,31 +109,89 @@ class ModelServer:
             )
             model_kwargs["quantization_config"] = bnb_config
             model_kwargs["device_map"] = "auto"
-        else:
-            model_kwargs["torch_dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
+            # Remove torch_dtype when using quantization
+            model_kwargs.pop("torch_dtype", None)
         
-        # Check if this is a vision model
-        if "vision" in self.model_name.lower() or "vla" in self.model_name.lower():
+        # Special handling for OpenVLA and VLA models - use AutoModel directly
+        if "openvla" in self.model_name.lower() or "vla" in self.model_name.lower():
             self.is_vision_model = True
             try:
-                self.model = AutoModelForVision2Seq.from_pretrained(
+                logger.info("Loading model with AutoModel (vision/VLA model detected)")
+                self.model = AutoModel.from_pretrained(
                     self.model_name,
                     **model_kwargs
                 )
-                self.processor = AutoProcessor.from_pretrained(
-                    self.model_name,
-                    trust_remote_code=True
-                )
+                
+                # Try to load processor, some models might not have it
+                try:
+                    self.processor = AutoProcessor.from_pretrained(
+                        self.model_name,
+                        trust_remote_code=True
+                    )
+                    logger.info("Processor loaded successfully")
+                except Exception as e:
+                    logger.warning(f"Could not load processor: {e}")
+                    # Fall back to tokenizer if processor is not available
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        self.model_name,
+                        trust_remote_code=True
+                    )
+                    if self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                    logger.info("Using tokenizer instead of processor")
+                
+                logger.info("Vision/VLA model loaded successfully")
+                
             except Exception as e:
-                logger.warning(f"Failed to load as vision model: {e}")
+                logger.error(f"Failed to load vision/VLA model: {e}")
+                raise
+                
+        # Check if this is a generic vision model
+        elif "vision" in self.model_name.lower() or "kimi" in self.model_name.lower():
+            self.is_vision_model = True
+            try:
+                logger.info("Loading model with AutoModel (generic approach)")
+                self.model = AutoModel.from_pretrained(
+                    self.model_name,
+                    **model_kwargs
+                )
+                
+                # Try to load processor first, then tokenizer
+                try:
+                    self.processor = AutoProcessor.from_pretrained(
+                        self.model_name,
+                        trust_remote_code=True
+                    )
+                except Exception:
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        self.model_name,
+                        trust_remote_code=True
+                    )
+                    if self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                        
+            except Exception as e:
+                logger.warning(f"Failed to load as vision model with AutoModel: {e}")
                 logger.info("Attempting to load as standard causal LM...")
                 self.is_vision_model = False
         
+        # Standard text model loading
         if not self.is_vision_model:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                **model_kwargs
-            )
+            try:
+                # First try AutoModel for maximum compatibility
+                logger.info("Loading model with AutoModel (standard approach)")
+                self.model = AutoModel.from_pretrained(
+                    self.model_name,
+                    **model_kwargs
+                )
+            except Exception as e:
+                logger.info(f"AutoModel failed, trying AutoModelForCausalLM: {e}")
+                # Fall back to AutoModelForCausalLM
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    **model_kwargs
+                )
+            
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
                 trust_remote_code=True
@@ -222,6 +307,8 @@ def main():
                        help='Host to bind to (default: 0.0.0.0)')
     parser.add_argument('--quantization', type=str, choices=['4bit', '8bit', 'none'], default='none',
                        help='Quantization mode for model loading')
+    parser.add_argument('--attn-implementation', type=str, choices=['eager', 'flash_attention_2', 'auto'], default='auto',
+                       help='Attention implementation to use (default: auto - will use flash_attention_2 if available)')
     parser.add_argument('--reload', action='store_true',
                        help='Enable auto-reload for development')
     
@@ -240,7 +327,8 @@ def main():
         model_server = ModelServer(
             model_name=args.model,
             device=device,
-            quantization=args.quantization if args.quantization != 'none' else None
+            quantization=args.quantization if args.quantization != 'none' else None,
+            attn_implementation=args.attn_implementation.replace('-', '_')  # Convert CLI arg format
         )
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
