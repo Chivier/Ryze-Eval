@@ -160,6 +160,141 @@ class AnthropicInterface(BaseModelInterface):
             results.append(self.generate(prompt, **kwargs))
         return results
 
+class VLLMInterface(BaseModelInterface):
+    def __init__(self):
+        from openai import OpenAI
+        self.base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8001")
+        self.api_key = os.getenv("VLLM_API_KEY", "EMPTY")  # vLLM doesn't require API key
+        self.model_name = os.getenv("VLLM_MODEL_NAME", "meta-llama/Llama-2-7b-hf")
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
+        self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
+        
+        # Initialize OpenAI client for vLLM's OpenAI-compatible API
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=f"{self.base_url}/v1"
+        )
+        
+        # Test connection
+        try:
+            models = self.client.models.list()
+            available_models = [model.id for model in models.data]
+            if available_models:
+                print(f"✓ Connected to vLLM server. Available models: {available_models}")
+                # Use the first available model if not explicitly set
+                if self.model_name not in available_models and available_models:
+                    self.model_name = available_models[0]
+                    print(f"  Using model: {self.model_name}")
+            else:
+                print(f"⚠️  vLLM server has no models loaded")
+        except Exception as e:
+            print(f"⚠️  Could not connect to vLLM server at {self.base_url}: {e}")
+            print("  Make sure to start the server with: python scripts/start_vllm_server.py --model <model_name>")
+    
+    def generate(self, prompt: str, **kwargs) -> str:
+        try:
+            response = self.client.completions.create(
+                model=self.model_name,
+                prompt=prompt,
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                top_p=kwargs.get("top_p", 0.9),
+                frequency_penalty=kwargs.get("frequency_penalty", 0.0),
+                presence_penalty=kwargs.get("presence_penalty", 0.0),
+                stop=kwargs.get("stop", None)
+            )
+            return response.choices[0].text
+        except Exception as e:
+            # Try chat completion format as fallback
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                    temperature=kwargs.get("temperature", self.temperature),
+                    top_p=kwargs.get("top_p", 0.9),
+                    frequency_penalty=kwargs.get("frequency_penalty", 0.0),
+                    presence_penalty=kwargs.get("presence_penalty", 0.0),
+                    stop=kwargs.get("stop", None)
+                )
+                return response.choices[0].message.content
+            except Exception as e2:
+                print(f"Error generating with vLLM: {e}, {e2}")
+                return ""
+    
+    def batch_generate(self, prompts: List[str], **kwargs) -> List[str]:
+        # vLLM supports async batch processing, but for simplicity we'll use sequential calls
+        # For production, consider using async/await with vLLM's batch API
+        results = []
+        for prompt in prompts:
+            results.append(self.generate(prompt, **kwargs))
+        return results
+
+class TransformersInterface(BaseModelInterface):
+    def __init__(self):
+        import requests
+        self.base_url = os.getenv("TRANSFORMERS_BASE_URL", "http://localhost:8000")
+        self.model_name = os.getenv("TRANSFORMERS_MODEL_NAME", "meta-llama/Llama-2-7b-hf")
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
+        self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
+        self.session = requests.Session()
+        
+        # Test connection
+        try:
+            response = self.session.get(f"{self.base_url}/health", timeout=5)
+            if response.status_code == 200:
+                health_data = response.json()
+                print(f"✓ Connected to Transformers server: {health_data.get('model', 'unknown')}")
+            else:
+                print(f"⚠️  Transformers server returned status {response.status_code}")
+        except Exception as e:
+            print(f"⚠️  Could not connect to Transformers server at {self.base_url}: {e}")
+            print("  Make sure to start the server with: python scripts/start_transformers_server.py --model <model_name>")
+    
+    def generate(self, prompt: str, **kwargs) -> str:
+        try:
+            response = self.session.post(
+                f"{self.base_url}/generate",
+                json={
+                    "prompt": prompt,
+                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+                    "temperature": kwargs.get("temperature", self.temperature),
+                    "top_p": kwargs.get("top_p", 0.9),
+                    "do_sample": kwargs.get("do_sample", True)
+                },
+                timeout=120
+            )
+            if response.status_code == 200:
+                return response.json()["text"]
+            else:
+                print(f"Error from Transformers server: {response.status_code} - {response.text}")
+                return ""
+        except Exception as e:
+            print(f"Error generating with Transformers: {e}")
+            return ""
+    
+    def batch_generate(self, prompts: List[str], **kwargs) -> List[str]:
+        try:
+            response = self.session.post(
+                f"{self.base_url}/batch_generate",
+                json={
+                    "prompts": prompts,
+                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+                    "temperature": kwargs.get("temperature", self.temperature),
+                    "top_p": kwargs.get("top_p", 0.9),
+                    "do_sample": kwargs.get("do_sample", True)
+                },
+                timeout=300
+            )
+            if response.status_code == 200:
+                return response.json()["texts"]
+            else:
+                print(f"Error from Transformers server: {response.status_code} - {response.text}")
+                return [""] * len(prompts)
+        except Exception as e:
+            print(f"Error batch generating with Transformers: {e}")
+            return [""] * len(prompts)
+
 class ModelFactory:
     @staticmethod
     def create_model(provider: Optional[str] = None) -> BaseModelInterface:
@@ -178,12 +313,16 @@ class ModelFactory:
             return GeminiInterface()
         elif provider == "anthropic":
             return AnthropicInterface()
+        elif provider == "transformers":
+            return TransformersInterface()
+        elif provider == "vllm":
+            return VLLMInterface()
         else:
             raise ValueError(f"Unknown model provider: {provider}")
     
     @staticmethod
     def get_available_providers() -> List[str]:
-        return ["ollama", "openai", "deepseek", "gemini", "anthropic"]
+        return ["ollama", "openai", "deepseek", "gemini", "anthropic", "transformers", "vllm"]
 
 if __name__ == "__main__":
     print("Testing Model Interface...")

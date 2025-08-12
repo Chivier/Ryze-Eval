@@ -10,7 +10,8 @@
 
 - **数据获取与管理**: 按配置分别下载 Lab-Bench 各子集并保存为 JSON
 - **评测执行**: 支持对单个或全部子集进行选择题评测，可限制条数快速验证
-- **多模型对接**: 通过统一接口对接 `ollama / openai / deepseek / gemini / anthropic`
+- **多模型对接**: 通过统一接口对接 `ollama / openai / deepseek / gemini / anthropic / transformers / vllm`
+- **本地模型支持**: 支持通过 Transformers 和 vLLM 加载本地模型，包括视觉语言模型
 - **结果保存**: 自动输出明细与汇总指标（准确率、覆盖率、平均响应时长等）
 - **结果可视化**: 一键生成子集对比、子任务热力图、响应时长分布图
 - **样例导出**: 从 FigQA / TableQA 子集导出示例图片，便于快速查看
@@ -27,6 +28,10 @@
 - `src/analyze_dataset.py` 数据概览与统计
 - `src/extract_images.py` 抽取样例图片
 - `src/test_dataset_loading.py` 数据加载验证脚本
+- `scripts/start_transformers_server.py` Transformers 模型服务启动脚本
+- `scripts/start_vllm_server.py` vLLM 高性能推理服务启动脚本
+- `scripts/test_transformers.py` Transformers 集成测试
+- `scripts/test_vllm.py` vLLM 集成测试
 - `requirements.txt` 依赖
 
 ---
@@ -43,7 +48,7 @@ pip install -r requirements.txt
 3) 配置环境变量（在项目根目录创建 `.env`）:
 
 ```bash
-# 选择默认提供商: ollama / openai / deepseek / gemini / anthropic
+# 选择默认提供商: ollama / openai / deepseek / gemini / anthropic / transformers / vllm
 MODEL_PROVIDER=ollama
 
 # 通用可选项
@@ -70,6 +75,14 @@ OLLAMA_MODEL=gemma3:12b
 # Anthropic
 # ANTHROPIC_API_KEY=your_key
 # ANTHROPIC_MODEL=claude-3-5-sonnet
+
+# Transformers (本地模型)
+# TRANSFORMERS_BASE_URL=http://localhost:8000
+# TRANSFORMERS_MODEL_NAME=openvla/openvla-7b
+
+# vLLM (高性能推理)
+# VLLM_BASE_URL=http://localhost:8001
+# VLLM_MODEL_NAME=meta-llama/Llama-2-7b-hf
 ```
 
 ---
@@ -154,7 +167,9 @@ python -m src.test_dataset_loading
 
 ---
 
-## 使用 Ollama 快速测试
+## 使用本地模型
+
+### 使用 Ollama
 
 1) 确保 Ollama 已安装并运行：
 
@@ -174,6 +189,66 @@ ollama pull gemma3:12b
 python -m src.run_evaluation --limit 5 --verbose
 ```
 
+### 使用 Transformers（支持视觉语言模型）
+
+1) 启动 Transformers 服务器：
+
+```bash
+# 标准文本模型
+python scripts/start_transformers_server.py --model meta-llama/Llama-2-7b-hf --gpu 0 --port 8000
+
+# 视觉语言模型（如 OpenVLA）
+python scripts/start_transformers_server.py --model openvla/openvla-7b --gpu 0 --port 8000
+
+# 量化模型（节省显存）
+python scripts/start_transformers_server.py --model meta-llama/Llama-2-70b-hf --gpu 0 --quantization 4bit
+```
+
+2) 运行评测：
+
+```bash
+python -m src.run_evaluation --provider transformers --subset FigQA --limit 10
+```
+
+3) 测试集成：
+
+```bash
+python scripts/test_transformers.py
+```
+
+### 使用 vLLM（高性能推理）
+
+1) 安装 vLLM：
+
+```bash
+pip install vllm
+```
+
+2) 启动 vLLM 服务器：
+
+```bash
+# 单 GPU
+python scripts/start_vllm_server.py --model meta-llama/Llama-2-7b-hf --gpu 0 --port 8001
+
+# 多 GPU 张量并行（大模型）
+python scripts/start_vllm_server.py --model meta-llama/Llama-2-70b-hf --gpu 0,1,2,3 --tensor-parallel 4
+
+# 量化模型
+python scripts/start_vllm_server.py --model TheBloke/Llama-2-7B-AWQ --quantization awq --port 8001
+```
+
+3) 运行评测：
+
+```bash
+python -m src.run_evaluation --provider vllm --subset all --output-dir ./results
+```
+
+4) 测试集成：
+
+```bash
+python scripts/test_vllm.py --performance  # 包含性能测试
+```
+
 ---
 
 ## 注意事项
@@ -182,6 +257,8 @@ python -m src.run_evaluation --limit 5 --verbose
 2) 首次运行会下载数据集（约几百 MB）  
 3) 完整评测包含 1967 个问题，可能需要较长时间  
 4) 建议先用 `--limit` 参数进行小规模测试
+5) Transformers 和 vLLM 需要 GPU 支持，请确保有足够的显存
+6) vLLM 提供更快的推理速度，适合批量评测和生产环境
 
 ---
 
@@ -189,6 +266,9 @@ python -m src.run_evaluation --limit 5 --verbose
 
 - 初始化模型报错：检查 `.env` 是否配置、Ollama 服务是否启动、云端 API Key 是否有效
 - 评测未覆盖全部题目：可提高 `MAX_TOKENS` 或检查输出解析是否返回合法选项字母（A–H）
+- Transformers 服务连接失败：确保服务已启动，检查端口是否正确（默认 8000）
+- vLLM 显存不足：尝试使用量化模型或减少 `--gpu-memory-utilization` 参数
+- 多 GPU 配置：vLLM 使用 `--tensor-parallel` 参数，Transformers 目前仅支持单 GPU
 
 ---
 

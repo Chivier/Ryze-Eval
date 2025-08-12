@@ -15,7 +15,7 @@ load_dotenv()
 def main():
     parser = argparse.ArgumentParser(description='Run Lab-Bench evaluation')
     parser.add_argument('--provider', type=str, default=None, 
-                       help='Model provider (ollama, openai, deepseek, gemini, anthropic)')
+                       help='Model provider (ollama, openai, deepseek, gemini, anthropic, transformers, vllm)')
     parser.add_argument('--subset', type=str, default='all',
                        help='Specific subset to evaluate or "all" for complete evaluation')
     parser.add_argument('--limit', type=int, default=None,
@@ -55,6 +55,10 @@ def main():
         model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
     elif provider == 'anthropic':
         model_name = os.getenv('ANTHROPIC_MODEL', 'claude-opus-4-1-20250805')
+    elif provider == 'transformers':
+        model_name = os.getenv('TRANSFORMERS_MODEL_NAME', 'meta-llama/Llama-2-7b-hf')
+    elif provider == 'vllm':
+        model_name = os.getenv('VLLM_MODEL_NAME', 'meta-llama/Llama-2-7b-hf')
     else:
         model_name = 'unknown'
     
