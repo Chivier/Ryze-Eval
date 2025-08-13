@@ -1,14 +1,35 @@
-datasets
-huggingface_hub
-python-dotenv
-requests
-tqdm
-pandas
-numpy
-ollama
-openai
-anthropic
-google-generativeai
-Pillow
-matplotlib
-seaborn
+# Core dependencies
+torch>=2.0.0
+transformers==4.47.0
+accelerate>=0.20.0
+safetensors
+einops
+sentencepiece
+protobuf
+bitsandbytes
+
+# Model-specific dependencies
+tiktoken  # For Kimi-VL
+blobfile  # For Kimi-VL tiktoken support
+qwen-vl-utils  # For Qwen-based models
+attrdict
+gym
+dm-tree
+ftfy
+regex
+
+# Vision dependencies
+opencv-python
+scipy
+timm
+av
+pillow
+
+# API server dependencies
+fastapi
+uvicorn
+pydantic
+
+# Optional model-specific packages (install as needed)
+# deepseek-vl  # For DeepSeek-VL (not available via pip, needs custom install)
+# auto-gptq  # For quantized models (has build issues, install separately if needed)

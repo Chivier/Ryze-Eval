@@ -56,7 +56,12 @@ def main():
     elif provider == 'anthropic':
         model_name = os.getenv('ANTHROPIC_MODEL', 'claude-opus-4-1-20250805')
     elif provider == 'transformers':
-        model_name = os.getenv('TRANSFORMERS_MODEL_NAME', 'meta-llama/Llama-2-7b-hf')
+        # For deployed transformers models, we specify the endpoint
+        model_name = os.getenv('TRANSFORMERS_MODEL_NAME', 'kimi-vl')
+        # You can also use environment variables for the endpoints:
+        # TRANSFORMERS_ENDPOINT=http://localhost:8010 for Kimi-VL
+        # TRANSFORMERS_ENDPOINT=http://localhost:8011 for OpenVLA  
+        # TRANSFORMERS_ENDPOINT=http://localhost:8012 for DeepSeek-VL
     elif provider == 'vllm':
         model_name = os.getenv('VLLM_MODEL_NAME', 'meta-llama/Llama-2-7b-hf')
     else:

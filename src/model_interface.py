@@ -233,31 +233,52 @@ class VLLMInterface(BaseModelInterface):
 class TransformersInterface(BaseModelInterface):
     def __init__(self):
         import requests
-        self.base_url = os.getenv("TRANSFORMERS_BASE_URL", "http://localhost:8000")
-        self.model_name = os.getenv("TRANSFORMERS_MODEL_NAME", "meta-llama/Llama-2-7b-hf")
-        self.max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
-        self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
         self.session = requests.Session()
+        
+        # Get model name and determine endpoint
+        self.model_name = os.getenv("TRANSFORMERS_MODEL_NAME", "kimi-vl")
+        
+        # Map model names to their deployment ports
+        model_endpoints = {
+            "kimi-vl": "http://localhost:8010",
+            "openvla": "http://localhost:8011", 
+            "deepseek-vl": "http://localhost:8012"
+        }
+        
+        # Use TRANSFORMERS_ENDPOINT if set, otherwise use model-specific endpoint
+        if os.getenv("TRANSFORMERS_ENDPOINT"):
+            self.base_url = os.getenv("TRANSFORMERS_ENDPOINT")
+        elif self.model_name.lower() in model_endpoints:
+            self.base_url = model_endpoints[self.model_name.lower()]
+        else:
+            # Default to port 8000 for generic transformers server
+            self.base_url = os.getenv("TRANSFORMERS_BASE_URL", "http://localhost:8000")
+        
+        self.max_tokens = int(os.getenv("MAX_TOKENS", "512"))
+        self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
         
         # Test connection
         try:
             response = self.session.get(f"{self.base_url}/health", timeout=5)
             if response.status_code == 200:
                 health_data = response.json()
-                print(f"✓ Connected to Transformers server: {health_data.get('model', 'unknown')}")
+                print(f"✓ Connected to Transformers server at {self.base_url}")
+                print(f"  Model loaded: {health_data.get('model_loaded', False)}")
             else:
                 print(f"⚠️  Transformers server returned status {response.status_code}")
         except Exception as e:
             print(f"⚠️  Could not connect to Transformers server at {self.base_url}: {e}")
-            print("  Make sure to start the server with: python scripts/start_transformers_server.py --model <model_name>")
+            print(f"  Make sure the model server is running.")
+            print(f"  For deployed models, use: python scripts/deploy_three_models.py")
     
     def generate(self, prompt: str, **kwargs) -> str:
         try:
+            # Use the deployed model API format
             response = self.session.post(
                 f"{self.base_url}/generate",
                 json={
                     "prompt": prompt,
-                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+                    "max_new_tokens": kwargs.get("max_new_tokens", kwargs.get("max_tokens", self.max_tokens)),
                     "temperature": kwargs.get("temperature", self.temperature),
                     "top_p": kwargs.get("top_p", 0.9),
                     "do_sample": kwargs.get("do_sample", True)
@@ -265,7 +286,15 @@ class TransformersInterface(BaseModelInterface):
                 timeout=120
             )
             if response.status_code == 200:
-                return response.json()["text"]
+                result = response.json()
+                # Handle both response formats
+                if "generated_text" in result:
+                    return result["generated_text"]
+                elif "text" in result:
+                    return result["text"]
+                else:
+                    print(f"Unexpected response format: {result}")
+                    return ""
             else:
                 print(f"Error from Transformers server: {response.status_code} - {response.text}")
                 return ""
@@ -274,26 +303,11 @@ class TransformersInterface(BaseModelInterface):
             return ""
     
     def batch_generate(self, prompts: List[str], **kwargs) -> List[str]:
-        try:
-            response = self.session.post(
-                f"{self.base_url}/batch_generate",
-                json={
-                    "prompts": prompts,
-                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-                    "temperature": kwargs.get("temperature", self.temperature),
-                    "top_p": kwargs.get("top_p", 0.9),
-                    "do_sample": kwargs.get("do_sample", True)
-                },
-                timeout=300
-            )
-            if response.status_code == 200:
-                return response.json()["texts"]
-            else:
-                print(f"Error from Transformers server: {response.status_code} - {response.text}")
-                return [""] * len(prompts)
-        except Exception as e:
-            print(f"Error batch generating with Transformers: {e}")
-            return [""] * len(prompts)
+        # Most deployed models don't have batch endpoints, so we'll do sequential generation
+        results = []
+        for prompt in prompts:
+            results.append(self.generate(prompt, **kwargs))
+        return results
 
 class ModelFactory:
     @staticmethod
