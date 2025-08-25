@@ -257,41 +257,47 @@ class TransformersInterface(BaseModelInterface):
         self.max_tokens = int(os.getenv("MAX_TOKENS", "512"))
         self.temperature = float(os.getenv("TEMPERATURE", "0.7"))
         
-        # Test connection
+        # Test connection using OpenAI-compatible endpoint
         try:
-            response = self.session.get(f"{self.base_url}/health", timeout=5)
+            response = self.session.get(f"{self.base_url}/v1/models", timeout=5)
             if response.status_code == 200:
-                health_data = response.json()
+                models_data = response.json()
                 print(f"✓ Connected to Transformers server at {self.base_url}")
-                print(f"  Model loaded: {health_data.get('model_loaded', False)}")
+                if "data" in models_data and models_data["data"]:
+                    available_models = [model["id"] for model in models_data["data"]]
+                    print(f"  Available models: {available_models}")
+                    # Use the first available model if our specified model isn't available
+                    if self.model_name not in available_models and available_models:
+                        print(f"  Using available model: {available_models[0]}")
+                        self.model_name = available_models[0]
+                else:
+                    print("  No models available")
             else:
                 print(f"⚠️  Transformers server returned status {response.status_code}")
         except Exception as e:
             print(f"⚠️  Could not connect to Transformers server at {self.base_url}: {e}")
-            print(f"  Make sure the model server is running.")
-            print(f"  For deployed models, use: python scripts/deploy_three_models.py")
+            print(f"  Make sure the model server is running with OpenAI-compatible API.")
     
     def generate(self, prompt: str, **kwargs) -> str:
         try:
-            # Use the deployed model API format
+            # Use OpenAI-compatible chat completions format (like LlamaFactory)
             response = self.session.post(
-                f"{self.base_url}/generate",
+                f"{self.base_url}/v1/chat/completions",
                 json={
-                    "prompt": prompt,
-                    "max_new_tokens": kwargs.get("max_new_tokens", kwargs.get("max_tokens", self.max_tokens)),
+                    "model": kwargs.get("model", self.model_name) or "gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
                     "temperature": kwargs.get("temperature", self.temperature),
                     "top_p": kwargs.get("top_p", 0.9),
-                    "do_sample": kwargs.get("do_sample", True)
+                    "stream": False
                 },
                 timeout=120
             )
             if response.status_code == 200:
                 result = response.json()
-                # Handle both response formats
-                if "generated_text" in result:
-                    return result["generated_text"]
-                elif "text" in result:
-                    return result["text"]
+                # Handle OpenAI-compatible response format
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
                 else:
                     print(f"Unexpected response format: {result}")
                     return ""
