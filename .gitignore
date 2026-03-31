@@ -140,6 +140,32 @@ Desktop.ini
 .huggingface/
 huggingface_hub/
 
+# Local evaluation data and model artifacts
+.venv/
+venv/
+.ryze/
+outputs/
+results/
+logs/
+eval_results/
+data/
+datasets/
+dataset/
+*.pdf
+*.arrow
+*.parquet
+*.jsonl
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+checkpoint-*/
+final_model/
+merged_model/
+huggingface_model/
+._*
+
 # Keep important files
 !requirements.txt
 !README.md
