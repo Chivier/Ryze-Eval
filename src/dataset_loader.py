@@ -51,7 +51,34 @@ class LabBenchDatasetLoader:
             
             data = []
             for item in tqdm(self.dataset[split]):
-                data.append(item)
+                # Convert item to serializable format
+                serializable_item = {}
+                for key, value in item.items():
+                    # Skip PIL Image objects and other non-serializable types
+                    if hasattr(value, '__class__') and ('Image' in str(value.__class__) or 'PIL' in str(value.__class__.__module__)):
+                        # Skip image objects - they'll be loaded from figure-path or table-path
+                        continue
+                    elif isinstance(value, list):
+                        # Handle lists that might contain images
+                        serializable_list = []
+                        for v in value:
+                            if hasattr(v, '__class__') and ('Image' in str(v.__class__) or 'PIL' in str(v.__class__.__module__)):
+                                # Skip image objects in lists
+                                continue
+                            else:
+                                serializable_list.append(v)
+                        if serializable_list or key in ['distractors']:  # Keep empty distractor lists
+                            serializable_item[key] = serializable_list
+                    elif isinstance(value, (str, int, float, bool, dict, type(None))):
+                        serializable_item[key] = value
+                    else:
+                        # Try to convert to string for other types
+                        try:
+                            serializable_item[key] = str(value)
+                        except:
+                            # Skip if can't convert
+                            continue
+                data.append(serializable_item)
             
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)

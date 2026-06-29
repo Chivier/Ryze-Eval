@@ -113,8 +113,6 @@ class ModelServer:
             model_kwargs.pop("torch_dtype", None)
         
         # Special handling for OpenVLA and VLA models - use AutoModel directly
-        if "openvla" in self.model_name.lower() or "vla" in self.model_name.lower():
-            self.is_vision_model = True
             try:
                 logger.info("Loading model with AutoModel (vision/VLA model detected)")
                 self.model = AutoModel.from_pretrained(
@@ -298,7 +296,7 @@ async def batch_generate(request: BatchGenerateRequest):
 def main():
     parser = argparse.ArgumentParser(description='Start Transformers model server')
     parser.add_argument('--model', type=str, required=True,
-                       help='Model name or path (e.g., "openvla/openvla-7b", "meta-llama/Llama-2-7b-hf")')
+                       help='Model name or path (e.g., "meta-llama/Llama-2-7b-hf", "deepseek-ai/deepseek-vl-7b-chat")')
     parser.add_argument('--gpu', type=str, default='0',
                        help='GPU device ID to use (e.g., "0", "1", "0,1") or "auto" for automatic')
     parser.add_argument('--port', type=int, default=8000,

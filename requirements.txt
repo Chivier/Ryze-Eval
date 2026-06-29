@@ -2,6 +2,7 @@
 torch>=2.0.0
 transformers==4.47.0
 accelerate>=0.20.0
+datasets>=2.14.0  # Required for Lab-Bench dataset loading
 safetensors
 einops
 sentencepiece

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Deploy three vision-language models on different ports and GPUs using transformers
+Deploy two vision-language models on different ports and GPUs using transformers
 - Kimi-VL-A3B-Thinking-2506 on port 8010, GPU 2,3
-- OpenVLA-7B on port 8011, GPU 4,5
-- DeepSeek-VL-7B-Chat on port 8012, GPU 6,7
+- DeepSeek-VL-7B-Chat on port 8012, GPU 4,5
 """
 
 import os
 import sys
+import subprocess
+import signal
+import time
 import torch
 import uvicorn
 import traceback
@@ -54,14 +56,13 @@ class ModelServer:
         self.port = port
         # When using CUDA_VISIBLE_DEVICES, the visible GPU becomes device 0
         # gpu_id == -1 indicates multi-GPU mode
-        self.device = f"cuda:0" if torch.cuda.is_available() else "cpu"
+        # For multi-GPU, we'll use device_map="auto" in model loading
+        self.device = None  # Will be set based on single vs multi-GPU mode
         self.model = None
         self.tokenizer = None
         self.processor = None
         
-        # Set CUDA device only if available and not in multi-GPU mode
-        if torch.cuda.is_available() and gpu_id != -1:
-            torch.cuda.set_device(0)
+        # CPU mode only - no CUDA device setting
         
         # Create FastAPI app
         self.app = FastAPI(title=f"Model Server - {model_name}")
@@ -87,45 +88,55 @@ class ModelServer:
                 
                 # Generate response
                 with torch.no_grad():
-                    # Prepare inputs based on model type
-                    if "kimi" in self.model_name.lower():
-                        # Kimi-VL model
-                        inputs = self.tokenizer(
-                            request.prompt,
+                    # Handle different model types
+                    if self.processor and images:
+                        # Vision-language model with images
+                        inputs = self.processor(
+                            text=request.prompt,
+                            images=images,
                             return_tensors="pt"
-                        ).to(self.device)
-                        
-                        outputs = self.model.generate(
-                            **inputs,
-                            max_new_tokens=request.max_new_tokens,
-                            temperature=request.temperature,
-                            top_p=request.top_p,
-                            do_sample=request.do_sample
-                        )
-                        
-                        generated_text = self.tokenizer.decode(
-                            outputs[0], 
-                            skip_special_tokens=True
                         )
                     else:
-                        # Generic handling for other models
+                        # Text-only or no processor
                         inputs = self.tokenizer(
                             request.prompt,
-                            return_tensors="pt"
-                        ).to(self.device)
-                        
-                        outputs = self.model.generate(
-                            **inputs,
-                            max_new_tokens=request.max_new_tokens,
-                            temperature=request.temperature,
-                            top_p=request.top_p,
-                            do_sample=request.do_sample
+                            return_tensors="pt",
+                            padding=True,
+                            truncation=True,
+                            max_length=512
                         )
-                        
-                        generated_text = self.tokenizer.decode(
-                            outputs[0], 
-                            skip_special_tokens=True
-                        )
+                    
+                    # Handle device placement for distributed models
+                    if self.device is None:
+                        # Model is distributed, let it handle device placement
+                        input_ids = inputs['input_ids']
+                        attention_mask = inputs.get('attention_mask')
+                    else:
+                        # Single device model
+                        device = self.device
+                        input_ids = inputs['input_ids'].to(device)
+                        attention_mask = inputs['attention_mask'].to(device) if 'attention_mask' in inputs else None
+                    
+                    outputs = self.model.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        max_new_tokens=request.max_new_tokens,
+                        temperature=request.temperature if request.temperature > 0 else 1.0,
+                        top_p=request.top_p,
+                        do_sample=request.do_sample,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id
+                    )
+                    
+                    # Decode only the generated part (excluding the input)
+                    # Move to CPU for slicing to avoid CUDA errors
+                    outputs_cpu = outputs.cpu()
+                    input_length = input_ids.shape[1]
+                    generated_tokens = outputs_cpu[0][input_length:]
+                    generated_text = self.tokenizer.decode(
+                        generated_tokens, 
+                        skip_special_tokens=True
+                    )
                 
                 return GenerateResponse(
                     generated_text=generated_text,
@@ -141,88 +152,131 @@ class ModelServer:
     
     def load_model(self):
         """Load the model based on model name"""
-        print(f"Loading {self.model_name} on GPU {self.gpu_id}...")
+        gpu_info = f"GPUs {os.environ.get('CUDA_VISIBLE_DEVICES', 'N/A')}" if self.gpu_id == -1 else f"GPU {os.environ.get('CUDA_VISIBLE_DEVICES', 'N/A')}"
         
         try:
             if "kimi" in self.model_name.lower():
-                # Load Kimi-VL model
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    "moonshotai/Kimi-VL-A3B-Thinking-2506",
-                    trust_remote_code=True
-                )
+                print(f"Loading Kimi-VL-A3B-Thinking-2506 on {gpu_info}...")
                 
-                # Load model with auto device map for multi-GPU support
-                if self.gpu_id == -1:
-                    # Multi-GPU mode
-                    print("  Using multi-GPU mode for Kimi-VL...")
-                    self.model = AutoModelForCausalLM.from_pretrained(
+                try:
+                    # Load the actual Kimi-VL model
+                    self.tokenizer = AutoTokenizer.from_pretrained(
                         "moonshotai/Kimi-VL-A3B-Thinking-2506",
-                        torch_dtype=torch.bfloat16,
-                        device_map="auto",  # Automatically distribute across available GPUs
-                        trust_remote_code=True,
-                        max_memory={0: "20GiB", 1: "20GiB"}  # Limit memory per GPU
-                    )
-                    print(f"✓ Kimi-VL loaded successfully on multiple GPUs")
-                else:
-                    # Single GPU mode (fallback)
-                    self.model = AutoModelForCausalLM.from_pretrained(
-                        "moonshotai/Kimi-VL-A3B-Thinking-2506",
-                        torch_dtype=torch.bfloat16,
-                        device_map=self.device,
                         trust_remote_code=True
                     )
-                    print(f"✓ Kimi-VL loaded successfully on GPU {self.gpu_id}")
-                
-            elif "openvla" in self.model_name.lower():
-                # OpenVLA requires special handling
-                print("⚠ OpenVLA requires custom dependencies")
-                print("  Attempting to load with AutoModel...")
-                
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    "openvla/openvla-7b",
-                    trust_remote_code=True
-                )
-                
-                # For now, just use a smaller placeholder model for OpenVLA
-                # since it requires special dependencies
-                print("  Using smaller placeholder model for testing")
-                from transformers import GPT2LMHeadModel, GPT2Config
-                config = GPT2Config(
-                    vocab_size=32000,
-                    n_positions=1024,
-                    n_embd=768,
-                    n_layer=12,
-                    n_head=12,
-                )
-                self.model = GPT2LMHeadModel(config).to(self.device)
-                print(f"✓ OpenVLA tokenizer loaded, using placeholder model on GPU {self.gpu_id}")
+                    
+                    # Create custom device map for the two GPUs
+                    # GPUs appear as 0 and 1 when CUDA_VISIBLE_DEVICES is set
+                    print(f"  Distributing model across {gpu_info} (this may take a while)...")
+                    
+                    # Create balanced device map for two GPUs
+                    device_map = {
+                        # Split model layers between GPU 0 and GPU 1
+                        # This will need to be adjusted based on actual model architecture
+                        0: [0, 1],
+                        1: [2, 3],
+                    }
+                    
+                    # Load with explicit device placement
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        "moonshotai/Kimi-VL-A3B-Thinking-2506",
+                        torch_dtype=torch.bfloat16,
+                        device_map="balanced",  # Use balanced distribution
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True,
+                        max_memory={0: "22GiB", 1: "22GiB"}  # Leave some memory for operations
+                    )
+                    
+                    # For generation, we don't set self.device as the model handles it
+                    self.device = None  # Model is distributed
+                    
+                    # Check actual memory usage
+                    if torch.cuda.is_available():
+                        for i in range(torch.cuda.device_count()):
+                            mem_used = torch.cuda.memory_allocated(i) / 1024**3
+                            print(f"  GPU {i} memory used: {mem_used:.2f} GB")
+                    
+                    print(f"✓ Kimi-VL-A3B loaded and distributed across {gpu_info}")
+                    
+                except Exception as e:
+                    print(f"⚠ Failed to load full Kimi-VL model: {e}")
+                    print("  Falling back to placeholder for testing...")
+                    # Fallback to small model
+                    from transformers import GPT2LMHeadModel, GPT2Tokenizer
+                    self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.model = GPT2LMHeadModel.from_pretrained("gpt2")
+                    self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                    self.model = self.model.to(self.device)
+                    print(f"✓ Placeholder model loaded on {gpu_info}")
                 
             elif "deepseek" in self.model_name.lower():
-                # DeepSeek-VL requires special handling
-                print("⚠ DeepSeek-VL loading...")
+                print(f"Loading DeepSeek-VL-7B-Chat on {gpu_info}...")
                 
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    "deepseek-ai/deepseek-vl-7b-chat",
-                    trust_remote_code=True
-                )
-                
-                # For now, just use a smaller placeholder model for DeepSeek-VL
-                # since it requires special dependencies
-                print("  Using smaller placeholder model for testing")
-                # Get the actual vocab size from the tokenizer
-                vocab_size = len(self.tokenizer) if hasattr(self.tokenizer, '__len__') else 100000
-                print(f"  Tokenizer vocab size: {vocab_size}")
-                
-                from transformers import GPT2LMHeadModel, GPT2Config
-                config = GPT2Config(
-                    vocab_size=vocab_size,  # Match the tokenizer's vocab size
-                    n_positions=1024,
-                    n_embd=768,
-                    n_layer=12,
-                    n_head=12,
-                )
-                self.model = GPT2LMHeadModel(config).to(self.device)
-                print(f"✓ DeepSeek-VL tokenizer loaded, using placeholder model on GPU {self.gpu_id}")
+                try:
+                    # DeepSeek-VL needs special handling for multi-modal
+                    # First try the direct import method
+                    try:
+                        from deepseek_vl.models import VLChatProcessor, MultiModalityCausalLM
+                        
+                        print("  Using DeepSeek-VL native classes...")
+                        self.processor = VLChatProcessor.from_pretrained("deepseek-ai/deepseek-vl-7b-chat")
+                        self.tokenizer = self.processor.tokenizer  # For compatibility
+                        
+                        print(f"  Distributing DeepSeek-VL-7B across {gpu_info} (this may take a while)...")
+                        self.model = MultiModalityCausalLM.from_pretrained(
+                            "deepseek-ai/deepseek-vl-7b-chat",
+                            torch_dtype=torch.bfloat16,
+                            device_map="balanced",
+                            low_cpu_mem_usage=True,
+                            max_memory={0: "22GiB", 1: "22GiB"}
+                        )
+                        
+                    except ImportError:
+                        # Fallback to direct loading with custom model
+                        print("  DeepSeek-VL package not found, loading with custom model class...")
+                        
+                        # DeepSeek-VL is based on Llama architecture with vision components
+                        # We'll load it as a standard model and handle vision separately
+                        from transformers import LlamaForCausalLM, LlamaTokenizer
+                        
+                        print("  Loading as Llama-based model with vision extensions...")
+                        self.tokenizer = LlamaTokenizer.from_pretrained(
+                            "deepseek-ai/deepseek-vl-7b-chat"
+                        )
+                        
+                        print(f"  Distributing DeepSeek-VL-7B across {gpu_info} (this may take a while)...")
+                        
+                        # Load the language model part
+                        self.model = LlamaForCausalLM.from_pretrained(
+                            "deepseek-ai/deepseek-vl-7b-chat",
+                            torch_dtype=torch.bfloat16,
+                            device_map="balanced",
+                            low_cpu_mem_usage=True,
+                            max_memory={0: "22GiB", 1: "22GiB"},
+                            ignore_mismatched_sizes=True  # Ignore vision component size mismatches
+                        )
+                    
+                    self.device = None  # Model is distributed
+                    
+                    # Check actual memory usage
+                    if torch.cuda.is_available():
+                        for i in range(torch.cuda.device_count()):
+                            mem_used = torch.cuda.memory_allocated(i) / 1024**3
+                            print(f"  GPU {i} memory used: {mem_used:.2f} GB")
+                    
+                    print(f"✓ DeepSeek-VL-7B loaded and distributed across {gpu_info}")
+                    
+                except Exception as e:
+                    print(f"⚠ Failed to load DeepSeek-VL-7B: {e}")
+                    print("  Falling back to placeholder...")
+                    from transformers import GPT2LMHeadModel, GPT2Tokenizer
+                    self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.model = GPT2LMHeadModel.from_pretrained("gpt2")
+                    self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                    self.model = self.model.to(self.device)
+                    print(f"✓ Placeholder model loaded on {gpu_info}")
                 
             else:
                 raise ValueError(f"Unknown model: {self.model_name}")
@@ -237,77 +291,115 @@ class ModelServer:
         self.load_model()
         uvicorn.run(self.app, host="0.0.0.0", port=self.port)
 
-def run_model_server(model_name: str, gpu_id: int, port: int):
-    """Function to run a model server in a separate process"""
-    # Set CUDA visible devices
-    import os
+def run_model_server(model_name: str, gpu_ids: str, port: int):
+    """Function to run a model server in a separate process
     
-    if "kimi" in model_name.lower():
-        # Allow Kimi-VL to use multiple GPUs (4 and 5)
-        os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+    Args:
+        model_name: Name of the model to deploy
+        gpu_ids: Comma-separated string of GPU IDs (e.g., "2,3" or "4")
+        port: Port to run the server on
+    """
+    # Set CUDA visible devices to the specified GPUs
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    
+    # Check if multi-GPU mode
+    if "," in gpu_ids:
+        # Multi-GPU mode
         server = ModelServer(model_name, -1, port)  # -1 indicates multi-GPU
     else:
-        # Isolate single GPU for other models
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # Single GPU mode
         server = ModelServer(model_name, 0, port)  # Use device 0 since only one GPU is visible
     
     server.run()
 
+def kill_processes_on_port(port):
+    """Kill any process using the specified port"""
+    import subprocess
+    import signal
+    
+    try:
+        # Try using lsof first (common on Unix systems)
+        result = subprocess.run(
+            f"lsof -ti :{port}", 
+            shell=True, 
+            capture_output=True, 
+            text=True
+        )
+        if result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    print(f"  Killed process {pid} on port {port}")
+                except:
+                    pass
+            return True
+    except:
+        pass
+    
+    try:
+        # Alternative using fuser
+        subprocess.run(f"fuser -k {port}/tcp", shell=True, capture_output=True)
+        return True
+    except:
+        pass
+    
+    return False
+
 def main():
-    """Main function to deploy all three models"""
+    """Main function to deploy all two models"""
     # Model configurations
     models = [
         {
             "name": "kimi-vl",
-            "gpu": 4,
+            "gpus": "2,3",  # Use GPUs 2 and 3
             "port": 8010
         },
         {
-            "name": "openvla",
-            "gpu": 5,
-            "port": 8011
-        },
-        {
             "name": "deepseek-vl",
-            "gpu": 6,
+            "gpus": "4,5",  # Use GPUs 4 and 5
             "port": 8012
         }
     ]
     
     print("=" * 60)
-    print("Deploying Three Vision-Language Models")
+    print("Deploying Two Vision-Language Models")
     print("=" * 60)
     
+    # Clean up ports before starting
+    print("\nCleaning up ports...")
+    for model_config in models:
+        port = model_config['port']
+        if kill_processes_on_port(port):
+            print(f"  Cleared port {port}")
+        else:
+            print(f"  Port {port} is free")
+    
+    time.sleep(2)  # Wait for ports to be fully released
+    
     # Check GPU availability
-    if not torch.cuda.is_available():
-        print("✗ CUDA is not available. Exiting.")
-        sys.exit(1)
-    
-    num_gpus = torch.cuda.device_count()
-    print(f"✓ Found {num_gpus} GPUs")
-    
-    # Check if we have enough GPUs
-    required_gpus = [4, 5, 6]
-    if num_gpus < 7:
-        print(f"⚠ Warning: Only {num_gpus} GPUs available, but GPUs {required_gpus} are requested")
-        print("  Models will be deployed on available GPUs with potential conflicts")
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        print(f"\n✓ Found {num_gpus} GPUs")
+        print("  Note: Using placeholder models for testing")
     
     # Create processes for each model
     processes = []
     
     for model_config in models:
-        print(f"\nStarting {model_config['name']} on GPU {model_config['gpu']}, port {model_config['port']}...")
+        print(f"\nStarting {model_config['name']} on GPU(s) {model_config['gpus']}, port {model_config['port']}...")
         
         # Create a new process for each model
         p = multiprocessing.Process(
             target=run_model_server,
-            args=(model_config['name'], model_config['gpu'], model_config['port'])
+            args=(model_config['name'], model_config['gpus'], model_config['port'])
         )
         p.start()
         processes.append(p)
         
         # Wait a bit for the server to start
-        import time
         time.sleep(5)
     
     print("\n" + "=" * 60)

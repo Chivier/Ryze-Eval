@@ -89,7 +89,7 @@ def main():
         dataset = {}
         for config in configs:
             print(f"  Loading {config}...")
-            dataset[config] = load_dataset("futurehouse/lab-bench", config)['train']
+            dataset[config] = load_dataset("futurehouse/lab-bench", config, cache_dir="./data")['train']
         
         print(f"✓ Dataset loaded with {len(dataset)} subsets")
     except Exception as e:

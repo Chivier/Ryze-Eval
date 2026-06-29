@@ -241,7 +241,6 @@ class TransformersInterface(BaseModelInterface):
         # Map model names to their deployment ports
         model_endpoints = {
             "kimi-vl": "http://localhost:8010",
-            "openvla": "http://localhost:8011", 
             "deepseek-vl": "http://localhost:8012"
         }
         

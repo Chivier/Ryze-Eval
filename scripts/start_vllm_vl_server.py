@@ -36,15 +36,6 @@ MODEL_CONFIGS = {
         "dtype": "auto",
         "trust_remote_code": True,
         "extra_args": []
-    },
-    "openvla/openvla-7b": {
-        "max_model_len": 8192,
-        "gpu_memory_utilization": 0.9,
-        "max_num_seqs": 128,
-        "enforce_eager": True,  # May need eager mode for custom ops
-        "dtype": "bfloat16",
-        "trust_remote_code": True,
-        "extra_args": []
     }
 }
 
@@ -205,17 +196,13 @@ def main():
 Supported Vision-Language Models with Optimized Configs:
   - moonshotai/Kimi-VL-A3B-Thinking-2506
   - deepseek-ai/deepseek-vl-7b-chat
-  - openvla/openvla-7b
 
 Examples:
-  # Kimi-VL on GPU 4, port 8010
-  python start_vllm_vl_server.py --model moonshotai/Kimi-VL-A3B-Thinking-2506 --gpu 4 --port 8010
+  # Kimi-VL on GPU 2,3, port 8010
+  python start_vllm_vl_server.py --model moonshotai/Kimi-VL-A3B-Thinking-2506 --gpu 2,3 --port 8010
 
-  # DeepSeek-VL on GPU 5, port 8011
-  python start_vllm_vl_server.py --model deepseek-ai/deepseek-vl-7b-chat --gpu 5 --port 8011
-
-  # OpenVLA on GPU 6, port 8012
-  python start_vllm_vl_server.py --model openvla/openvla-7b --gpu 6 --port 8012
+  # DeepSeek-VL on GPU 4,5, port 8012
+  python start_vllm_vl_server.py --model deepseek-ai/deepseek-vl-7b-chat --gpu 4,5 --port 8012
 
   # Multi-GPU with tensor parallelism
   python start_vllm_vl_server.py --model deepseek-ai/deepseek-vl-7b-chat --gpu 0,1 --tensor-parallel 2
